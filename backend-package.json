@@ -1,0 +1,30 @@
+{
+  "name": "nfc-backend-service",
+  "version": "1.0.0",
+  "description": "USB RFID Reader Backend Service for Student Card System",
+  "main": "usb-rfid-backend.js",
+  "scripts": {
+    "start": "node usb-rfid-backend.js",
+    "dev": "nodemon usb-rfid-backend.js",
+    "test": "node test-serial.js"
+  },
+  "keywords": [
+    "rfid",
+    "nfc",
+    "student-cards",
+    "usb",
+    "serial"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "body-parser": "^1.20.2",
+    "serialport": "^12.0.0",
+    "@serialport/parser-readline": "^12.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
