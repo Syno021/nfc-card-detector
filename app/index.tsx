@@ -1,13 +1,13 @@
-import { ThemedView } from '@/components/themed-view';
 import { ThemedText } from '@/components/themed-text';
+import { ThemedView } from '@/components/themed-view';
 import { Colors } from '@/constants/colors';
 import { useAuth } from '@/contexts/AuthContext';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { UserService } from '@/services/userService';
 import { useRouter } from 'expo-router';
-import { useEffect, useState, useRef } from 'react';
-import { ActivityIndicator, Alert, Image, StyleSheet, View, AppState } from 'react-native';
-import NfcManager, { NfcTech, NfcEvents } from 'react-native-nfc-manager';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, AppState, Image, Platform, StyleSheet, View } from 'react-native';
+import NfcManager, { NfcTech } from 'react-native-nfc-manager';
 
 type CardReadResult = {
   cardId: string;
@@ -20,7 +20,19 @@ type CardReadResult = {
  * Returns the formatted card ID and basic metadata.
  */
 const readRfidCard = async (): Promise<CardReadResult> => {
+  // Skip on web platform
+  if (Platform.OS === 'web') {
+    return null;
+  }
+
   try {
+    // Check if NFC is enabled before requesting technology
+    const isEnabled = await NfcManager.isEnabled();
+    if (!isEnabled) {
+      console.log('[NFC] ⚠️ NFC is not enabled');
+      return null;
+    }
+
     // Request NFC technology - using NfcA / MifareClassic for most student RFID cards
     await NfcManager.requestTechnology([NfcTech.NfcA, NfcTech.MifareClassic]);
 
@@ -28,17 +40,20 @@ const readRfidCard = async (): Promise<CardReadResult> => {
     const tag = await NfcManager.getTag();
 
     if (!tag) {
-      console.log('No tag found');
+      console.log('[NFC] No tag found');
       return null;
     }
 
-    console.log('Tag detected:', tag);
+    console.log('[NFC] 🏷️ Tag detected:', JSON.stringify(tag, null, 2));
 
     // Extract card ID (UID) - this is the unique identifier
     const cardId = tag.id || 'UNKNOWN';
 
     // Get card type
     const cardType = tag.techTypes?.join(', ') || 'Unknown RFID';
+    
+    console.log('[NFC] 📋 Card ID:', cardId);
+    console.log('[NFC] 📋 Card Type:', cardType);
 
     // For MIFARE Classic cards, you can read specific sectors
     // (requires authentication with keys - usually default keys)
@@ -46,23 +61,40 @@ const readRfidCard = async (): Promise<CardReadResult> => {
 
     if (tag.techTypes?.includes('android.nfc.tech.MifareClassic')) {
       try {
-        additionalData = await readMifareClassicData();
+        console.log('[NFC] Reading MIFARE Classic data...');
+        // Pass the tag to avoid requesting technology again
+        additionalData = await readMifareClassicData(tag);
+        if (additionalData) {
+          console.log('[NFC] ✓ MIFARE data read successfully');
+        }
       } catch (error) {
-        console.log('Could not read MIFARE data:', error);
+        console.log('[NFC] ⚠️ Could not read MIFARE data:', error);
       }
     }
 
+    const formattedCardId = formatCardId(cardId);
+    console.log('[NFC] ✓ Card read successfully - Formatted ID:', formattedCardId);
+
     return {
-      cardId: formatCardId(cardId),
+      cardId: formattedCardId,
       cardType,
       data: additionalData,
     };
-  } catch (error) {
-    console.log('RFID card read error:', error);
+  } catch (error: any) {
+    // Ignore user cancellation errors (when card is removed)
+    if (error?.message?.includes('cancel') || error?.message?.includes('User')) {
+      console.log('[NFC] Card read cancelled by user');
+      return null;
+    }
+    console.log('[NFC] ❌ RFID card read error:', error);
     return null;
   } finally {
     // Always cancel the technology request
-    NfcManager.cancelTechnologyRequest();
+    try {
+      await NfcManager.cancelTechnologyRequest();
+    } catch (err) {
+      // Ignore errors when canceling
+    }
   }
 };
 
@@ -70,17 +102,15 @@ const readRfidCard = async (): Promise<CardReadResult> => {
  * Read data from MIFARE Classic card sectors
  * Note: This requires knowing the authentication keys
  * Most student cards use default keys: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+ * @param tag - The tag object from getTag() (optional, will use current tag if not provided)
  */
-const readMifareClassicData = async () => {
+const readMifareClassicData = async (tag?: any) => {
   try {
     const defaultKey = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff]; // Default MIFARE key
     const sector = 1; // Read from sector 1 (sector 0 is usually system data)
     const blockIndex = 4; // First block of sector 1
 
-    // Authenticate with the sector using the correct API
-    // Use MifareClassicHandlerAndroid for Android-specific operations
-    const tech = await NfcManager.requestTechnology(NfcTech.MifareClassic);
-    
+    // Technology is already requested in readRfidCard, so we can directly authenticate
     // The correct way to authenticate depends on the library version
     // For react-native-nfc-manager v3+, use:
     await NfcManager.mifareClassicAuthenticateA(blockIndex, defaultKey);
@@ -149,22 +179,61 @@ export default function LandingScreen() {
   const appState = useRef(AppState.currentState);
   const isProcessingRef = useRef(false);
 
+  const [isNfcReady, setIsNfcReady] = useState(false);
+  const nfcInitializedRef = useRef(false);
+
   // Initialise NFC once when screen is mounted
   useEffect(() => {
     let isActive = true;
 
     const initNfc = async () => {
+      // Skip on web platform
+      if (Platform.OS === 'web') {
+        console.log('[NFC] NFC not supported on web platform');
+        return;
+      }
+
+      // Prevent multiple initializations
+      if (nfcInitializedRef.current) {
+        console.log('[NFC] NFC already initialized, skipping...');
+        return;
+      }
+
       try {
+        console.log('[NFC] Initializing NFC Manager...');
+        
+        // Check if NFC manager is available
+        if (!NfcManager || typeof (NfcManager as any).isSupported !== 'function') {
+          console.log('[NFC] ❌ NFC manager native module not available');
+          return;
+        }
+
         const supported = await NfcManager.isSupported();
         if (!supported) {
-          console.log('NFC is not supported on this device');
+          console.log('[NFC] ❌ NFC is not supported on this device');
           return;
         }
         
+        console.log('[NFC] ✓ NFC is supported on this device');
         await NfcManager.start();
-        console.log('NFC Manager started successfully');
+        nfcInitializedRef.current = true;
+        console.log('[NFC] ✓ NFC Manager started');
+        
+        // Check if NFC is enabled
+        const isEnabled = await NfcManager.isEnabled();
+        if (!isEnabled) {
+          console.log('[NFC] ⚠️ NFC is not enabled. Please enable NFC in device settings.');
+          return;
+        }
+
+        console.log('[NFC] ✓ NFC is enabled and ready');
+
+        if (isActive) {
+          setIsNfcReady(true);
+          console.log('[NFC] ✅ NFC Manager initialized successfully - Ready to scan for tags');
+        }
       } catch (err) {
-        console.log('Error starting NFC manager:', err);
+        console.log('[NFC] ❌ Error starting NFC manager:', err);
       }
     };
 
@@ -172,6 +241,10 @@ export default function LandingScreen() {
 
     return () => {
       isActive = false;
+      // Clean up NFC when component unmounts
+      if (Platform.OS !== 'web' && nfcInitializedRef.current) {
+        NfcManager.cancelTechnologyRequest().catch(() => {});
+      }
     };
   }, []);
 
@@ -197,14 +270,25 @@ export default function LandingScreen() {
 
   // Continuous NFC scanning
   useEffect(() => {
-    if (loading || user) {
-      // Don't scan if still loading or user is logged in
+    if (loading || user || !isNfcReady || Platform.OS === 'web') {
+      // Don't scan if still loading, user is logged in, NFC not ready, or on web
+      if (loading) {
+        console.log('[NFC] ⏳ Waiting for auth to finish loading...');
+      } else if (user) {
+        console.log('[NFC] ⏸️ User is logged in - Skipping NFC scan');
+      } else if (!isNfcReady) {
+        console.log('[NFC] ⏳ Waiting for NFC to be ready...');
+      } else if (Platform.OS === 'web') {
+        console.log('[NFC] ⏸️ Web platform - NFC scanning disabled');
+      }
       return;
     }
 
+    console.log('[NFC] ✅ All conditions met - Starting NFC scanning effect');
     let isMounted = true;
 
     const startContinuousScanning = async () => {
+      console.log('[NFC] 🔄 Starting continuous NFC scanning...');
       while (isMounted) {
         if (isProcessingRef.current) {
           // Wait a bit before trying again if we're processing
@@ -212,8 +296,25 @@ export default function LandingScreen() {
           continue;
         }
 
+        // Check if NFC is still enabled before each scan attempt
+        try {
+          const isEnabled = await NfcManager.isEnabled();
+          if (!isEnabled) {
+            console.log('[NFC] ⚠️ NFC disabled - waiting for re-enable...');
+            // Wait longer if NFC is disabled
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue;
+          }
+        } catch (err) {
+          console.log('[NFC] ⚠️ Error checking NFC status:', err);
+          // If we can't check status, wait before retrying
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue;
+        }
+
         try {
           setScanStatus('scanning');
+          console.log('[NFC] 🔍 Scanning for NFC tags...');
           const cardData = await readRfidCard();
 
           if (!isMounted) break;
@@ -221,6 +322,8 @@ export default function LandingScreen() {
           if (cardData && cardData.cardId && cardData.cardId !== 'UNKNOWN') {
             isProcessingRef.current = true;
             setScanStatus('processing');
+            console.log('[NFC] ✓ Card detected with ID:', cardData.cardId);
+            console.log('[NFC] 🔍 Looking up user in Firebase...');
 
             // Look up the user by NFC ID in Firestore
             const matchedUser = await UserService.getUserByNfcId(cardData.cardId);
@@ -228,6 +331,7 @@ export default function LandingScreen() {
             if (!isMounted) break;
 
             if (!matchedUser) {
+              console.log('[NFC] ❌ No user found in Firebase for NFC ID:', cardData.cardId);
               handleCardFailure('This card is not registered in the system.');
               isProcessingRef.current = false;
               setScanStatus('ready');
@@ -236,12 +340,22 @@ export default function LandingScreen() {
               continue;
             }
 
+            console.log('[NFC] ✅ User found in Firebase!');
+            console.log('[NFC] 👤 User details:', {
+              uid: matchedUser.uid,
+              email: matchedUser.email,
+              name: `${matchedUser.FirstName} ${matchedUser.LastName}`,
+              role: matchedUser.role,
+            });
+            console.log('[NFC] 🧭 Navigating to user-profile page...');
+
             // Navigate to profile screen, passing the NFC ID
             router.push({
               pathname: '/user-profile',
               params: { nfcId: cardData.cardId },
             });
 
+            console.log('[NFC] ✅ Navigation completed - Stopping scan loop');
             // Don't reset processing flag - we're navigating away
             break;
           }
@@ -249,7 +363,7 @@ export default function LandingScreen() {
           // Small delay before next scan attempt
           await new Promise(resolve => setTimeout(resolve, 300));
         } catch (error) {
-          console.log('Error during NFC scan:', error);
+          console.log('[NFC] ❌ Error during NFC scan:', error);
           if (isMounted) {
             setScanStatus('ready');
             // Wait a bit longer on error before retrying
@@ -257,6 +371,7 @@ export default function LandingScreen() {
           }
         }
       }
+      console.log('[NFC] 🔄 Scanning loop ended');
     };
 
     startContinuousScanning();
@@ -264,9 +379,11 @@ export default function LandingScreen() {
     return () => {
       isMounted = false;
       isProcessingRef.current = false;
-      NfcManager.cancelTechnologyRequest().catch(() => {});
+      if (Platform.OS !== 'web') {
+        NfcManager.cancelTechnologyRequest().catch(() => {});
+      }
     };
-  }, [loading, user, router]);
+  }, [loading, user, router, isNfcReady]);
 
   // Handle app state changes (background/foreground)
   useEffect(() => {
@@ -276,10 +393,13 @@ export default function LandingScreen() {
         nextAppState === 'active'
       ) {
         // App has come to foreground - NFC will auto-resume via the scanning effect
-        console.log('App resumed - NFC scanning will continue');
+        console.log('[NFC] App resumed - NFC scanning will continue');
       } else if (nextAppState === 'background') {
         // App going to background - cancel any ongoing NFC requests
-        NfcManager.cancelTechnologyRequest().catch(() => {});
+        console.log('[NFC] App going to background - Cancelling NFC requests');
+        if (Platform.OS !== 'web') {
+          NfcManager.cancelTechnologyRequest().catch(() => {});
+        }
         isProcessingRef.current = false;
       }
 
