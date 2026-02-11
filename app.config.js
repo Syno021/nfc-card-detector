@@ -42,6 +42,9 @@ module.exports = {
       typedRoutes: true
     },
     extra: {
+      eas: {
+        projectId: "ecc33a21-8621-4395-8a9c-d420de515a63"
+      },
       EXPO_PUBLIC_FIREBASE_API_KEY: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
       EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
       EXPO_PUBLIC_FIREBASE_PROJECT_ID: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
@@ -51,4 +54,3 @@ module.exports = {
     }
   }
 };
-
