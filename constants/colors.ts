@@ -1,5 +1,5 @@
 /**
- * Color palette for the NFC Card Reader app
+ * Color palette for the Card Detector app
  * Optimized for both light and dark modes
  */
 

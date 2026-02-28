@@ -7,7 +7,10 @@ import { UserService } from '@/services/userService';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, Image, Platform, StyleSheet, View } from 'react-native';
-import NfcManager, { NfcTech } from 'react-native-nfc-manager';
+import NfcManager, { Ndef, NfcTech } from 'react-native-nfc-manager';
+
+/** NDEF record type for app-specific user ID (optional; first text record is also used). */
+export const NDEF_RECORD_TYPE_USER_ID = 'application/vnd.nfc-card-detector.user';
 
 type CardReadResult = {
   cardId: string;
@@ -16,29 +19,88 @@ type CardReadResult = {
 } | null;
 
 /**
- * Read a generic NFC / RFID card.
- * Returns the formatted card ID and basic metadata.
+ * Supported NFC technologies, in priority order:
+ * - NfcA: physical cards (ISO 14443-3A), many student cards
+ * - Ndef: NDEF tags and phones emulating NDEF (e.g. Android Beam / app-written tags)
+ * - IsoDep: smart cards, some HCE on Android
+ * - MifareClassic: legacy MIFARE Classic cards
  */
-const readRfidCard = async (): Promise<CardReadResult> => {
-  // Skip on web platform
-  if (Platform.OS === 'web') {
+const NFC_TECH_LIST = [
+  NfcTech.NfcA,
+  NfcTech.Ndef,
+  NfcTech.IsoDep,
+  NfcTech.MifareClassic,
+] as const;
+
+/**
+ * Try to get a user ID from the tag's NDEF message (for phones/NDEF-only tags).
+ * Returns the first text payload, or a payload from a record with our app type, or null.
+ */
+const getNdefUserId = async (): Promise<string | null> => {
+  try {
+    const ndef = await NfcManager.getNdefMessage();
+    if (!ndef?.ndefMessage?.length) return null;
+
+    // Prefer a record with our app-specific type
+    for (const record of ndef.ndefMessage) {
+      const type = record.tnf === Ndef.TNF_EXTERNAL_TYPE && record.type
+        ? String.fromCharCode(...(Array.isArray(record.type) ? record.type : [record.type]))
+        : '';
+      if (type && type.toLowerCase().includes('nfc-card-detector')) {
+        const payload = decodeNdefPayload(record.payload);
+        if (payload) return payload.trim();
+      }
+    }
+
+    // Fallback: first text record
+    for (const record of ndef.ndefMessage) {
+      if (Ndef.isType(record, Ndef.TNF_WELL_KNOWN, Ndef.RTD_TEXT)) {
+        const text = Ndef.text.decodePayload(record.payload);
+        if (text) return text.trim();
+      }
+    }
+
+    // Last resort: first record with any payload (treat as UTF-8 string)
+    const first = ndef.ndefMessage[0];
+    if (first?.payload?.length) {
+      const decoded = decodeNdefPayload(first.payload);
+      if (decoded) return decoded.trim();
+    }
+  } catch (e) {
+    console.log('[NFC] NDEF read skipped or failed:', e);
+  }
+  return null;
+};
+
+/** Decode NDEF payload bytes to string (UTF-8). */
+function decodeNdefPayload(payload: number[] | Uint8Array): string | null {
+  if (!payload?.length) return null;
+  try {
+    const bytes = Array.isArray(payload) ? payload : [...payload];
+    return new TextDecoder().decode(new Uint8Array(bytes));
+  } catch {
     return null;
   }
+}
+
+/**
+ * Read any NFC tag or device: physical cards (NfcA, MifareClassic), NDEF tags, or phones emulating NDEF/IsoDep.
+ * Returns the formatted tag ID (or NDEF user ID) and basic metadata.
+ */
+const readRfidCard = async (): Promise<CardReadResult> => {
+  if (Platform.OS === 'web') return null;
 
   try {
-    // Check if NFC is enabled before requesting technology
     const isEnabled = await NfcManager.isEnabled();
     if (!isEnabled) {
       console.log('[NFC] ⚠️ NFC is not enabled');
       return null;
     }
 
-    // Request NFC technology - using NfcA / MifareClassic for most student RFID cards
-    await NfcManager.requestTechnology([NfcTech.NfcA, NfcTech.MifareClassic]);
+    // Request multiple techs so we support cards, NDEF tags, and phones (HCE/NDEF)
+    await NfcManager.requestTechnology([...NFC_TECH_LIST]);
 
-    // Get the tag information
     const tag = await NfcManager.getTag();
-
     if (!tag) {
       console.log('[NFC] No tag found');
       return null;
@@ -46,55 +108,57 @@ const readRfidCard = async (): Promise<CardReadResult> => {
 
     console.log('[NFC] 🏷️ Tag detected:', JSON.stringify(tag, null, 2));
 
-    // Extract card ID (UID) - this is the unique identifier
-    const cardId = tag.id || 'UNKNOWN';
+    const techList = tag.techTypes ?? [];
+    const cardType = techList.join(', ') || 'Unknown NFC';
 
-    // Get card type
-    const cardType = tag.techTypes?.join(', ') || 'Unknown RFID';
-    
-    console.log('[NFC] 📋 Card ID:', cardId);
-    console.log('[NFC] 📋 Card Type:', cardType);
+    // 1) Prefer tag UID (cards and many devices)
+    let rawId: string | number[] | null = tag.id ?? null;
+    let cardId = rawId != null ? formatCardId(rawId) : '';
 
-    // For MIFARE Classic cards, you can read specific sectors
-    // (requires authentication with keys - usually default keys)
-    let additionalData = null;
-
-    if (tag.techTypes?.includes('android.nfc.tech.MifareClassic')) {
-      try {
-        console.log('[NFC] Reading MIFARE Classic data...');
-        // Pass the tag to avoid requesting technology again
-        additionalData = await readMifareClassicData(tag);
-        if (additionalData) {
-          console.log('[NFC] ✓ MIFARE data read successfully');
-        }
-      } catch (error) {
-        console.log('[NFC] ⚠️ Could not read MIFARE data:', error);
+    // 2) If no UID or UNKNOWN, try NDEF (phones / NDEF-only tags)
+    if ((!cardId || cardId === 'UNKNOWN') && techList.some((t: string) => t?.toLowerCase?.().includes('ndef'))) {
+      const ndefUserId = await getNdefUserId();
+      if (ndefUserId) {
+        cardId = ndefUserId;
+        console.log('[NFC] 📋 User ID from NDEF:', cardId);
       }
     }
 
-    const formattedCardId = formatCardId(cardId);
-    console.log('[NFC] ✓ Card read successfully - Formatted ID:', formattedCardId);
+    if (!cardId || cardId === 'UNKNOWN') {
+      console.log('[NFC] No usable ID from tag or NDEF');
+      return null;
+    }
+
+    console.log('[NFC] 📋 Card/Device ID:', cardId);
+    console.log('[NFC] 📋 Tech:', cardType);
+
+    let additionalData: { sector?: number; block?: number; data?: string } | null = null;
+    if (techList.some((t: string) => t?.includes?.('MifareClassic'))) {
+      try {
+        console.log('[NFC] Reading MIFARE Classic data...');
+        additionalData = await readMifareClassicData(tag);
+        if (additionalData) console.log('[NFC] ✓ MIFARE data read successfully');
+      } catch (err) {
+        console.log('[NFC] ⚠️ Could not read MIFARE data:', err);
+      }
+    }
 
     return {
-      cardId: formattedCardId,
+      cardId,
       cardType,
-      data: additionalData,
+      data: additionalData ?? undefined,
     };
   } catch (error: any) {
-    // Ignore user cancellation errors (when card is removed)
     if (error?.message?.includes('cancel') || error?.message?.includes('User')) {
       console.log('[NFC] Card read cancelled by user');
       return null;
     }
-    console.log('[NFC] ❌ RFID card read error:', error);
+    console.log('[NFC] ❌ NFC read error:', error);
     return null;
   } finally {
-    // Always cancel the technology request
     try {
       await NfcManager.cancelTechnologyRequest();
-    } catch (err) {
-      // Ignore errors when canceling
-    }
+    } catch (_) {}
   }
 };
 
@@ -247,26 +311,6 @@ export default function LandingScreen() {
       }
     };
   }, []);
-
-  // Redirect already logged-in users based on their status
-  useEffect(() => {
-    if (!loading && user) {
-      // Check if user is approved and active
-      if (!user.isApproved || !user.isActive) {
-        router.replace('/pending-approval');
-        return;
-      }
-
-      // Redirect to appropriate dashboard
-      if (user.role === 'admin') {
-        router.replace('/(admin)/students');
-      } else if (user.role === 'staff') {
-        router.replace('/(staff)/my-card');
-      } else if (user.role === 'student') {
-        router.replace('/(student)/my-card');
-      }
-    }
-  }, [user, loading]);
 
   // Continuous NFC scanning
   useEffect(() => {

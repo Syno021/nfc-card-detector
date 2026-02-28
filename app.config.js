@@ -2,12 +2,12 @@ require('dotenv').config();
 
 module.exports = {
   expo: {
-    name: "CampusKey",
-    slug: "nfc-card-reader",
+    name: "Card Detector",
+    slug: "nfc-detector",
     version: "1.0.0",
     orientation: "portrait",
     icon: "./assets/images/icon.png",
-    scheme: "nfccardreader",
+    scheme: "nfcdetector",
     userInterfaceStyle: "automatic",
     newArchEnabled: true,
     splash: {
@@ -20,7 +20,7 @@ module.exports = {
     },
     ios: {
       supportsTablet: true,
-      bundleIdentifier: "com.anonymous.nfccardreader"
+      bundleIdentifier: "com.anonymous.nfcdetector"
     },
     android: {
       adaptiveIcon: {
@@ -28,7 +28,7 @@ module.exports = {
         monochromeImage: "./assets/images/android-icon-monochrome.png",
         backgroundImage: "./assets/images/android-icon-background.png"
       },
-      package: "com.anonymous.nfccardreader"
+      package: "com.anonymous.nfcdetector"
     },
     web: {
       bundler: "metro",

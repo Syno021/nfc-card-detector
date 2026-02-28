@@ -6,16 +6,53 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useUserCard } from '@/hooks/use-user-card';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Animated, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import NfcManager, { NfcTech } from 'react-native-nfc-manager';
+import NfcManager, { Ndef, NfcTech } from 'react-native-nfc-manager';
 
 type Role = 'student' | 'staff' | 'admin';
 
 ////////////////////////////// NFC/RFID helpers //////////////////////////////
 
+/** Same tech list as landing screen: cards, NDEF tags, and phones (HCE/NDEF). */
+const NFC_TECH_LIST = [
+  NfcTech.NfcA,
+  NfcTech.Ndef,
+  NfcTech.IsoDep,
+  NfcTech.MifareClassic,
+] as const;
+
+const decodeNdefPayload = (payload: number[] | Uint8Array): string | null => {
+  if (!payload?.length) return null;
+  try {
+    const bytes = Array.isArray(payload) ? payload : [...payload];
+    return new TextDecoder().decode(new Uint8Array(bytes));
+  } catch {
+    return null;
+  }
+};
+
+const getNdefUserId = async (): Promise<string | null> => {
+  try {
+    const ndef = await NfcManager.getNdefMessage();
+    if (!ndef?.ndefMessage?.length) return null;
+    for (const record of ndef.ndefMessage) {
+      if (Ndef.isType(record, Ndef.TNF_WELL_KNOWN, Ndef.RTD_TEXT)) {
+        const text = Ndef.text.decodePayload(record.payload);
+        if (text) return text.trim();
+      }
+    }
+    const first = ndef.ndefMessage[0];
+    if (first?.payload?.length) {
+      const decoded = decodeNdefPayload(first.payload);
+      if (decoded) return decoded.trim();
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+};
+
 /**
- * Read student RFID card data
- * This function is designed to work with common student ID RFID cards
- * (typically MIFARE Classic, MIFARE Ultralight, or ISO14443A cards)
+ * Read any NFC tag or device: physical cards, NDEF tags, or phones emulating NDEF.
  */
 const readStudentRfidCard = async (): Promise<{
   cardId: string;
@@ -23,47 +60,38 @@ const readStudentRfidCard = async (): Promise<{
   data?: any;
 } | null> => {
   try {
-    // Request NFC technology - using NfcA for most student RFID cards
-    await NfcManager.requestTechnology([NfcTech.NfcA, NfcTech.MifareClassic]);
-    
-    // Get the tag information
+    await NfcManager.requestTechnology([...NFC_TECH_LIST]);
     const tag = await NfcManager.getTag();
-    
     if (!tag) {
       console.log('No tag found');
       return null;
     }
 
     console.log('Tag detected:', tag);
+    const techList = tag.techTypes ?? [];
+    const cardType = techList.join(', ') || 'Unknown NFC';
 
-    // Extract card ID (UID) - this is the unique identifier
-    const cardId = tag.id || 'UNKNOWN';
-    
-    // Get card type
-    const cardType = tag.techTypes?.join(', ') || 'Unknown RFID';
-    
-    // For MIFARE Classic cards, you can read specific sectors
-    // (requires authentication with keys - usually default keys)
+    let cardId = tag.id != null ? formatCardId(tag.id) : '';
+    if ((!cardId || cardId === 'UNKNOWN') && techList.some((t: string) => t?.toLowerCase?.().includes('ndef'))) {
+      const ndefUserId = await getNdefUserId();
+      if (ndefUserId) cardId = ndefUserId;
+    }
+    if (!cardId || cardId === 'UNKNOWN') return null;
+
     let additionalData = null;
-    
-    if (tag.techTypes?.includes('android.nfc.tech.MifareClassic')) {
+    if (techList.some((t: string) => t?.includes?.('MifareClassic'))) {
       try {
         additionalData = await readMifareClassicData();
-      } catch (error) {
-        console.log('Could not read MIFARE data:', error);
+      } catch {
+        // ignore
       }
     }
 
-    return {
-      cardId: formatCardId(cardId),
-      cardType,
-      data: additionalData,
-    };
+    return { cardId, cardType, data: additionalData };
   } catch (error) {
-    console.log('RFID card read error:', error);
+    console.log('NFC read error:', error);
     return null;
   } finally {
-    // Always cancel the technology request
     NfcManager.cancelTechnologyRequest();
   }
 };
